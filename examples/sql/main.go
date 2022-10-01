@@ -19,23 +19,23 @@ import (
 // and then query the data from all shards.
 func main() {
 	// connect func
-	connect := sharding.ConnFunc[*sql.DB](func(_ context.Context, dsn string) (*sql.DB, error) {
-		return sql.Open("postgres", dsn)
+	connect := sharding.ConnFunc[*sql.DB](func(_ context.Context, addr string) (*sql.DB, error) {
+		return sql.Open("postgres", addr)
 	})
 
 	// define shards
 	shards := []sharding.ConnConfig[int64]{
 		{
-			ID:  1,
-			DSN: "postgres://postgres:password@localhost:5432/db1",
+			ID:   1,
+			Addr: "postgres://postgres:password@localhost:5432/db1",
 		},
 		{
-			ID:  2,
-			DSN: "postgres://postgres:password@localhost:5432/db2",
+			ID:   2,
+			Addr: "postgres://postgres:password@localhost:5432/db2",
 		},
 		{
-			ID:  3,
-			DSN: "postgres://postgres:password@localhost:5432/db3",
+			ID:   3,
+			Addr: "postgres://postgres:password@localhost:5432/db3",
 		},
 	}
 

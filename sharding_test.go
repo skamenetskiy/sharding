@@ -41,24 +41,24 @@ func TestConnConfig_valid(t *testing.T) {
 			switch tt.t {
 			case "int64":
 				cfgInt64 := &ConnConfig[int64]{
-					ID:  tt.fields.IDInt64,
-					DSN: tt.fields.DSN,
+					ID:   tt.fields.IDInt64,
+					Addr: tt.fields.DSN,
 				}
 				if err := cfgInt64.valid(); (err != nil) != tt.wantErr {
 					t.Errorf("valid() error = %v, wantErr %v", err, tt.wantErr)
 				}
 			case "uint64":
 				cfgUint64 := &ConnConfig[uint64]{
-					ID:  tt.fields.IDUint64,
-					DSN: tt.fields.DSN,
+					ID:   tt.fields.IDUint64,
+					Addr: tt.fields.DSN,
 				}
 				if err := cfgUint64.valid(); (err != nil) != tt.wantErr {
 					t.Errorf("valid() error = %v, wantErr %v", err, tt.wantErr)
 				}
 			case "string":
 				cfgString := &ConnConfig[string]{
-					ID:  tt.fields.IDString,
-					DSN: tt.fields.DSN,
+					ID:   tt.fields.IDString,
+					Addr: tt.fields.DSN,
 				}
 				if err := cfgString.valid(); (err != nil) != tt.wantErr {
 					t.Errorf("valid() error = %v, wantErr %v", err, tt.wantErr)

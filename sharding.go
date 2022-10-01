@@ -45,7 +45,7 @@ func Connect[KeyType ItemID, ConnID ConnectionID, ConnType any](
 			mu.Lock()
 			c.list = append(c.list, s)
 			mu.Unlock()
-		}(sc.ID, sc.DSN)
+		}(sc.ID, sc.Addr)
 	}
 	wg.Wait()
 	close(errCh)
@@ -78,8 +78,8 @@ type ConnFunc[ConnType any] func(ctx context.Context, addr string) (ConnType, er
 
 // ConnConfig type include constant connection id and dsn.
 type ConnConfig[ConnID ConnectionID] struct {
-	ID  ConnID `json:"id"`
-	DSN string `json:"dsn"`
+	ID   ConnID `json:"id"`
+	Addr string `json:"dsn"`
 }
 
 func (cfg *ConnConfig[ConnID]) valid() error {
@@ -97,7 +97,7 @@ func (cfg *ConnConfig[ConnID]) valid() error {
 			return errors.New("id cannot be an empty string")
 		}
 	}
-	if strings.TrimSpace(cfg.DSN) == "" {
+	if strings.TrimSpace(cfg.Addr) == "" {
 		return errors.New("validation: invalid dsn")
 	}
 	return nil
