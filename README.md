@@ -16,7 +16,6 @@
 
 ## Pitfalls
 
-- ❌ Connection identifiers are currently limited to `string`, `int64` or `uint64`.
 - ❌ Key types are currently limited to `string`, `int64`, `uint64` or `[]byte`.
 - ❌ There's no re-sharding support. It is too specific for each use case, thus pretty hard to implement.
 

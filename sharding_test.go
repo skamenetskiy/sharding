@@ -3,11 +3,18 @@ package sharding
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"testing"
 )
 
-type dummyHash[KeyType ItemID] struct{}
+type dummyStrategy[KeyType ID, ConnType any] struct{}
+
+func (dummyStrategy[KeyType, ConnType]) Find(key KeyType, shards []Shard[ConnType]) Shard[ConnType] {
+	return &shard[ConnType]{}
+}
+
+type dummyHash[KeyType ID] struct{}
 
 func (dummyHash[KeyType]) Sum(_ KeyType) uint64 {
 	return 1
@@ -15,10 +22,9 @@ func (dummyHash[KeyType]) Sum(_ KeyType) uint64 {
 
 func TestConnConfig_valid(t *testing.T) {
 	type fields struct {
-		IDInt64  int64
-		IDUint64 uint64
-		IDString string
-		DSN      string
+		ID int64
+
+		DSN string
 	}
 	tests := []struct {
 		t       string
@@ -26,45 +32,18 @@ func TestConnConfig_valid(t *testing.T) {
 		fields  fields
 		wantErr bool
 	}{
-		{"int64", "int64", fields{IDInt64: 1, DSN: "dsn"}, false},
-		{"int64", "int64 bad dsn", fields{IDInt64: 1, DSN: ""}, true},
-		{"uint64", "uint64", fields{IDUint64: 1, DSN: "dsn"}, false},
-		{"uint64", "uint64", fields{IDUint64: 1, DSN: ""}, true},
-		{"string", "string", fields{IDString: "1", DSN: "dsn"}, false},
-		{"string", "string", fields{IDString: "1", DSN: ""}, true},
-		{"int64", "bad int64", fields{IDInt64: 0, DSN: "dsn"}, true},
-		{"uint64", "bad uint64", fields{IDUint64: 0, DSN: "dsn"}, true},
-		{"string", "bad string", fields{IDString: "", DSN: "dsn"}, true},
+		{"int64", "int64", fields{ID: 1, DSN: "dsn"}, false},
+		{"int64", "int64 bad dsn", fields{ID: 1, DSN: ""}, true},
+		{"int64", "bad int64", fields{ID: 0, DSN: "dsn"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			switch tt.t {
-			case "int64":
-				cfgInt64 := &ConnConfig[int64]{
-					ID:   tt.fields.IDInt64,
-					Addr: tt.fields.DSN,
-				}
-				if err := cfgInt64.valid(); (err != nil) != tt.wantErr {
-					t.Errorf("valid() error = %v, wantErr %v", err, tt.wantErr)
-				}
-			case "uint64":
-				cfgUint64 := &ConnConfig[uint64]{
-					ID:   tt.fields.IDUint64,
-					Addr: tt.fields.DSN,
-				}
-				if err := cfgUint64.valid(); (err != nil) != tt.wantErr {
-					t.Errorf("valid() error = %v, wantErr %v", err, tt.wantErr)
-				}
-			case "string":
-				cfgString := &ConnConfig[string]{
-					ID:   tt.fields.IDString,
-					Addr: tt.fields.DSN,
-				}
-				if err := cfgString.valid(); (err != nil) != tt.wantErr {
-					t.Errorf("valid() error = %v, wantErr %v", err, tt.wantErr)
-				}
-			default:
-				t.Error("invalid id type")
+			cfgInt64 := &ShardConfig{
+				ID:   tt.fields.ID,
+				Addr: tt.fields.DSN,
+			}
+			if err := cfgInt64.valid(); (err != nil) != tt.wantErr {
+				t.Errorf("valid() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -74,14 +53,14 @@ func TestConnect(t *testing.T) {
 	type args struct {
 		ctx     context.Context
 		connect func(_ context.Context, dsn string) (struct{}, error)
-		hash    Hash[uint64]
-		configs []ConnConfig[uint64]
+		calc    Strategy[uint64, struct{}]
+		configs []ShardConfig
 	}
-	dh := newDefaultHash[uint64]()
+	dh := NewDefaultStrategy[uint64, struct{}](nil)
 	tests := []struct {
 		name    string
 		args    args
-		want    Cluster[uint64, uint64, struct{}]
+		want    Cluster[uint64, struct{}]
 		wantErr bool
 	}{
 		{
@@ -92,15 +71,15 @@ func TestConnect(t *testing.T) {
 					return struct{}{}, nil
 				},
 				dh,
-				[]ConnConfig[uint64]{
+				[]ShardConfig{
 					{1, "1"},
 				},
 			},
-			&cluster[uint64, uint64, struct{}]{
-				list: []Shard[uint64, struct{}]{
-					&shard[uint64, struct{}]{1, struct{}{}},
+			&cluster[uint64, struct{}]{
+				list: []Shard[struct{}]{
+					&shard[struct{}]{1, struct{}{}},
 				},
-				hash: dh,
+				calc: dh,
 			},
 			false,
 		},
@@ -112,7 +91,7 @@ func TestConnect(t *testing.T) {
 					return struct{}{}, nil
 				},
 				dh,
-				[]ConnConfig[uint64]{},
+				[]ShardConfig{},
 			},
 			nil,
 			true,
@@ -125,7 +104,7 @@ func TestConnect(t *testing.T) {
 					return struct{}{}, nil
 				},
 				dh,
-				[]ConnConfig[uint64]{
+				[]ShardConfig{
 					{0, ""},
 				},
 			},
@@ -140,7 +119,7 @@ func TestConnect(t *testing.T) {
 					return struct{}{}, errors.New("error")
 				},
 				dh,
-				[]ConnConfig[uint64]{
+				[]ShardConfig{
 					{1, "1"},
 				},
 			},
@@ -154,16 +133,16 @@ func TestConnect(t *testing.T) {
 				func(_ context.Context, _ string) (struct{}, error) {
 					return struct{}{}, nil
 				},
-				new(dummyHash[uint64]),
-				[]ConnConfig[uint64]{
+				new(dummyStrategy[uint64, struct{}]),
+				[]ShardConfig{
 					{1, "1"},
 				},
 			},
-			&cluster[uint64, uint64, struct{}]{
-				list: []Shard[uint64, struct{}]{
-					&shard[uint64, struct{}]{1, struct{}{}},
+			&cluster[uint64, struct{}]{
+				list: []Shard[struct{}]{
+					&shard[struct{}]{1, struct{}{}},
 				},
-				hash: new(dummyHash[uint64]),
+				calc: new(dummyStrategy[uint64, struct{}]),
 			},
 			false,
 		},
@@ -175,46 +154,125 @@ func TestConnect(t *testing.T) {
 					return struct{}{}, nil
 				},
 				nil,
-				[]ConnConfig[uint64]{
+				[]ShardConfig{
 					{1, "1"},
 				},
 			},
-			&cluster[uint64, uint64, struct{}]{
-				list: []Shard[uint64, struct{}]{
-					&shard[uint64, struct{}]{1, struct{}{}},
+			&cluster[uint64, struct{}]{
+				list: []Shard[struct{}]{
+					&shard[struct{}]{1, struct{}{}},
 				},
-				hash: dh,
+				calc: dh,
 			},
 			false,
 		},
 		{
-			"6",
+			"7",
 			args{
 				context.Background(),
 				func(_ context.Context, _ string) (struct{}, error) {
 					return struct{}{}, nil
 				},
 				nil,
-				[]ConnConfig[uint64]{
+				[]ShardConfig{
 					{2, "2"},
 					{3, "3"},
 					{1, "1"},
 				},
 			},
-			&cluster[uint64, uint64, struct{}]{
-				list: []Shard[uint64, struct{}]{
-					&shard[uint64, struct{}]{1, struct{}{}},
-					&shard[uint64, struct{}]{2, struct{}{}},
-					&shard[uint64, struct{}]{3, struct{}{}},
+			&cluster[uint64, struct{}]{
+				list: []Shard[struct{}]{
+					&shard[struct{}]{1, struct{}{}},
+					&shard[struct{}]{2, struct{}{}},
+					&shard[struct{}]{3, struct{}{}},
 				},
-				hash: dh,
+				calc: dh,
 			},
 			false,
+		},
+		{
+			"8",
+			args{
+				context.Background(),
+				nil,
+				nil,
+				[]ShardConfig{
+					{2, "2"},
+					{3, "3"},
+					{1, "1"},
+				},
+			},
+			nil,
+			true,
+		},
+		{
+			"9",
+			args{
+				nil,
+				func(_ context.Context, _ string) (struct{}, error) {
+					return struct{}{}, nil
+				},
+				nil,
+				[]ShardConfig{
+					{2, "2"},
+					{3, "3"},
+					{1, "1"},
+				},
+			},
+			&cluster[uint64, struct{}]{
+				list: []Shard[struct{}]{
+					&shard[struct{}]{1, struct{}{}},
+					&shard[struct{}]{2, struct{}{}},
+					&shard[struct{}]{3, struct{}{}},
+				},
+				calc: dh,
+			},
+			false,
+		},
+		{
+			"9",
+			args{
+				nil,
+				func(_ context.Context, _ string) (struct{}, error) {
+					return struct{}{}, nil
+				},
+				nil,
+				[]ShardConfig{
+					{1, "2"},
+					{3, "3"},
+					{1, "1"},
+				},
+			},
+			nil,
+			true,
+		},
+		{
+			"10",
+			args{
+				nil,
+				func(_ context.Context, _ string) (struct{}, error) {
+					return struct{}{}, nil
+				},
+				nil,
+				[]ShardConfig{
+					{2, "2"},
+					{3, "1"},
+					{1, "1"},
+				},
+			},
+			nil,
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Connect(tt.args.ctx, tt.args.connect, tt.args.hash, tt.args.configs...)
+			cfg := Config[uint64, struct{}]{
+				Context:  tt.args.ctx,
+				Connect:  tt.args.connect,
+				Strategy: tt.args.calc,
+				Shards:   tt.args.configs,
+			}
+			got, err := Connect(cfg)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Connect() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -228,50 +286,50 @@ func TestConnect(t *testing.T) {
 
 func Test_cluster_AllShards(t *testing.T) {
 	type fields struct {
-		list []Shard[uint64, struct{}]
+		list []Shard[struct{}]
 	}
 	tests := []struct {
 		name   string
 		fields fields
-		want   []Shard[uint64, struct{}]
+		want   []Shard[struct{}]
 	}{
 		{
 			"1",
-			fields{[]Shard[uint64, struct{}]{
-				&shard[uint64, struct{}]{0, struct{}{}},
+			fields{[]Shard[struct{}]{
+				&shard[struct{}]{0, struct{}{}},
 			}},
-			[]Shard[uint64, struct{}]{
-				&shard[uint64, struct{}]{0, struct{}{}},
+			[]Shard[struct{}]{
+				&shard[struct{}]{0, struct{}{}},
 			},
 		},
 		{
 			"2",
-			fields{[]Shard[uint64, struct{}]{
-				&shard[uint64, struct{}]{0, struct{}{}},
-				&shard[uint64, struct{}]{1, struct{}{}},
+			fields{[]Shard[struct{}]{
+				&shard[struct{}]{0, struct{}{}},
+				&shard[struct{}]{1, struct{}{}},
 			}},
-			[]Shard[uint64, struct{}]{
-				&shard[uint64, struct{}]{0, struct{}{}},
-				&shard[uint64, struct{}]{1, struct{}{}},
+			[]Shard[struct{}]{
+				&shard[struct{}]{0, struct{}{}},
+				&shard[struct{}]{1, struct{}{}},
 			},
 		},
 		{
 			"3",
-			fields{[]Shard[uint64, struct{}]{
-				&shard[uint64, struct{}]{0, struct{}{}},
-				&shard[uint64, struct{}]{1, struct{}{}},
-				&shard[uint64, struct{}]{2, struct{}{}},
+			fields{[]Shard[struct{}]{
+				&shard[struct{}]{0, struct{}{}},
+				&shard[struct{}]{1, struct{}{}},
+				&shard[struct{}]{2, struct{}{}},
 			}},
-			[]Shard[uint64, struct{}]{
-				&shard[uint64, struct{}]{0, struct{}{}},
-				&shard[uint64, struct{}]{1, struct{}{}},
-				&shard[uint64, struct{}]{2, struct{}{}},
+			[]Shard[struct{}]{
+				&shard[struct{}]{0, struct{}{}},
+				&shard[struct{}]{1, struct{}{}},
+				&shard[struct{}]{2, struct{}{}},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &cluster[uint64, uint64, struct{}]{
+			c := &cluster[uint64, struct{}]{
 				list: tt.fields.list,
 			}
 			if got := c.All(); !reflect.DeepEqual(got, tt.want) {
@@ -283,25 +341,25 @@ func Test_cluster_AllShards(t *testing.T) {
 
 func Test_cluster_Shard(t *testing.T) {
 	type fields struct {
-		list []Shard[uint64, struct{}]
-		hash Hash[uint64]
+		list []Shard[struct{}]
+		calc Strategy[uint64, struct{}]
 	}
 	type args struct {
 		id uint64
 	}
 	ff := fields{
-		list: []Shard[uint64, struct{}]{
-			&shard[uint64, struct{}]{1, struct{}{}},
-			&shard[uint64, struct{}]{2, struct{}{}},
-			&shard[uint64, struct{}]{3, struct{}{}},
+		list: []Shard[struct{}]{
+			&shard[struct{}]{1, struct{}{}},
+			&shard[struct{}]{2, struct{}{}},
+			&shard[struct{}]{3, struct{}{}},
 		},
-		hash: newDefaultHash[uint64](),
+		calc: NewDefaultStrategy[uint64, struct{}](nil),
 	}
 	tests := []struct {
 		name   string
 		fields fields
 		args   args
-		want   uint64
+		want   int64
 	}{
 		{"120", ff, args{120}, 1},
 		{"121", ff, args{121}, 1},
@@ -327,9 +385,9 @@ func Test_cluster_Shard(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &cluster[uint64, uint64, struct{}]{
+			c := &cluster[uint64, struct{}]{
 				list: tt.fields.list,
-				hash: tt.fields.hash,
+				calc: tt.fields.calc,
 			}
 			if got := c.One(tt.args.id).ID(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("One() = %v, want %v", got, tt.want)
@@ -363,19 +421,19 @@ func Test_defaultHash(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			switch tt.t {
 			case "int64":
-				if got := newDefaultHash[int64]().Sum(tt.args.int64Id); got != tt.want {
+				if got := NewDefaultHash[int64]().Sum(tt.args.int64Id); got != tt.want {
 					t.Errorf("defaultHash() = %v, want %v", got, tt.want)
 				}
 			case "uint64":
-				if got := newDefaultHash[uint64]().Sum(tt.args.uint64Id); got != tt.want {
+				if got := NewDefaultHash[uint64]().Sum(tt.args.uint64Id); got != tt.want {
 					t.Errorf("defaultHash() = %v, want %v", got, tt.want)
 				}
 			case "string":
-				if got := newDefaultHash[string]().Sum(tt.args.stringId); got != tt.want {
+				if got := NewDefaultHash[string]().Sum(tt.args.stringId); got != tt.want {
 					t.Errorf("defaultHash() = %v, want %v", got, tt.want)
 				}
 			case "bytes":
-				if got := newDefaultHash[[]byte]().Sum(tt.args.bytesId); got != tt.want {
+				if got := NewDefaultHash[[]byte]().Sum(tt.args.bytesId); got != tt.want {
 					t.Errorf("defaultHash() = %v, want %v", got, tt.want)
 				}
 			}
@@ -385,7 +443,7 @@ func Test_defaultHash(t *testing.T) {
 
 func Test_shard_Conn(t *testing.T) {
 	type fields struct {
-		id   uint64
+		id   int64
 		conn struct{}
 	}
 	tests := []struct {
@@ -399,7 +457,7 @@ func Test_shard_Conn(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &shard[uint64, struct{}]{
+			s := &shard[struct{}]{
 				id:   tt.fields.id,
 				conn: tt.fields.conn,
 			}
@@ -412,13 +470,13 @@ func Test_shard_Conn(t *testing.T) {
 
 func Test_shard_ID(t *testing.T) {
 	type fields struct {
-		id   uint64
+		id   int64
 		conn struct{}
 	}
 	tests := []struct {
 		name   string
 		fields fields
-		want   uint64
+		want   int64
 	}{
 		{"1", fields{1, struct{}{}}, 1},
 		{"2", fields{2, struct{}{}}, 2},
@@ -426,27 +484,27 @@ func Test_shard_ID(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &shard[uint64, struct{}]{
+			s := &shard[struct{}]{
 				id:   tt.fields.id,
 				conn: tt.fields.conn,
 			}
 			if got := s.ID(); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("ItemID() = %v, want %v", got, tt.want)
+				t.Errorf("ID() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
 func Test_cluster_Map(t *testing.T) {
-	sh := []Shard[uint64, struct{}]{
-		&shard[uint64, struct{}]{1, struct{}{}},
-		&shard[uint64, struct{}]{2, struct{}{}},
-		&shard[uint64, struct{}]{3, struct{}{}},
+	sh := []Shard[struct{}]{
+		&shard[struct{}]{1, struct{}{}},
+		&shard[struct{}]{2, struct{}{}},
+		&shard[struct{}]{3, struct{}{}},
 	}
-	dh := newDefaultHash[uint64]()
+	dh := NewDefaultStrategy[uint64, struct{}](nil)
 	type fields struct {
-		list []Shard[uint64, struct{}]
-		hash Hash[uint64]
+		list []Shard[struct{}]
+		calc Strategy[uint64, struct{}]
 	}
 	type args struct {
 		ids []uint64
@@ -455,13 +513,13 @@ func Test_cluster_Map(t *testing.T) {
 		name   string
 		fields fields
 		args   args
-		want   map[Shard[uint64, struct{}]][]uint64
+		want   map[Shard[struct{}]][]uint64
 	}{
 		{
 			"1",
 			fields{sh, dh},
 			args{ids: []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
-			map[Shard[uint64, struct{}]][]uint64{
+			map[Shard[struct{}]][]uint64{
 				sh[0]: {1, 7, 10},
 				sh[1]: {4, 9},
 				sh[2]: {2, 3, 5, 6, 8},
@@ -470,9 +528,9 @@ func Test_cluster_Map(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &cluster[uint64, uint64, struct{}]{
+			c := &cluster[uint64, struct{}]{
 				list: tt.fields.list,
-				hash: tt.fields.hash,
+				calc: tt.fields.calc,
 			}
 			if got := c.Map(tt.args.ids); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("Map() = %v, want %v", got, tt.want)
@@ -482,18 +540,18 @@ func Test_cluster_Map(t *testing.T) {
 }
 
 func Test_cluster_Each(t *testing.T) {
-	sh := []Shard[uint64, struct{}]{
-		&shard[uint64, struct{}]{1, struct{}{}},
-		&shard[uint64, struct{}]{2, struct{}{}},
-		&shard[uint64, struct{}]{3, struct{}{}},
+	sh := []Shard[struct{}]{
+		&shard[struct{}]{1, struct{}{}},
+		&shard[struct{}]{2, struct{}{}},
+		&shard[struct{}]{3, struct{}{}},
 	}
-	dh := newDefaultHash[uint64]()
+	dh := NewDefaultStrategy[uint64, struct{}](nil)
 	type fields struct {
-		list []Shard[uint64, struct{}]
-		hash Hash[uint64]
+		list []Shard[struct{}]
+		calc Strategy[uint64, struct{}]
 	}
 	type args struct {
-		fn func(s Shard[uint64, struct{}]) error
+		fn func(s Shard[struct{}]) error
 	}
 	tests := []struct {
 		name    string
@@ -504,7 +562,7 @@ func Test_cluster_Each(t *testing.T) {
 		{
 			"1",
 			fields{sh, dh},
-			args{func(s Shard[uint64, struct{}]) error {
+			args{func(s Shard[struct{}]) error {
 				return nil
 			}},
 			false,
@@ -512,7 +570,7 @@ func Test_cluster_Each(t *testing.T) {
 		{
 			"1",
 			fields{sh, dh},
-			args{func(s Shard[uint64, struct{}]) error {
+			args{func(s Shard[struct{}]) error {
 				return errors.New("error")
 			}},
 			true,
@@ -520,9 +578,9 @@ func Test_cluster_Each(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &cluster[uint64, uint64, struct{}]{
+			c := &cluster[uint64, struct{}]{
 				list: tt.fields.list,
-				hash: tt.fields.hash,
+				calc: tt.fields.calc,
 			}
 			if err := c.Each(tt.args.fn); (err != nil) != tt.wantErr {
 				t.Errorf("Each() error = %v, wantErr %v", err, tt.wantErr)
@@ -532,19 +590,19 @@ func Test_cluster_Each(t *testing.T) {
 }
 
 func Test_cluster_ByKey(t *testing.T) {
-	sh := []Shard[uint64, struct{}]{
-		&shard[uint64, struct{}]{1, struct{}{}},
-		&shard[uint64, struct{}]{2, struct{}{}},
-		&shard[uint64, struct{}]{3, struct{}{}},
+	sh := []Shard[struct{}]{
+		&shard[struct{}]{1, struct{}{}},
+		&shard[struct{}]{2, struct{}{}},
+		&shard[struct{}]{3, struct{}{}},
 	}
-	dh := newDefaultHash[uint64]()
+	dh := NewDefaultStrategy[uint64, struct{}](nil)
 	type fields struct {
-		list []Shard[uint64, struct{}]
-		hash Hash[uint64]
+		list []Shard[struct{}]
+		calc Strategy[uint64, struct{}]
 	}
 	type args struct {
 		ids []uint64
-		fn  func([]uint64, Shard[uint64, struct{}]) error
+		fn  func([]uint64, Shard[struct{}]) error
 	}
 	tests := []struct {
 		name    string
@@ -557,7 +615,7 @@ func Test_cluster_ByKey(t *testing.T) {
 			fields{sh, dh},
 			args{
 				[]uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
-				func(ids []uint64, s Shard[uint64, struct{}]) error {
+				func(ids []uint64, s Shard[struct{}]) error {
 					return nil
 				},
 			},
@@ -568,7 +626,7 @@ func Test_cluster_ByKey(t *testing.T) {
 			fields{sh, dh},
 			args{
 				[]uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
-				func(ids []uint64, s Shard[uint64, struct{}]) error {
+				func(ids []uint64, s Shard[struct{}]) error {
 					if len(ids)%2 == 0 {
 						return errors.New("error")
 					}
@@ -580,12 +638,200 @@ func Test_cluster_ByKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &cluster[uint64, uint64, struct{}]{
+			c := &cluster[uint64, struct{}]{
 				list: tt.fields.list,
-				hash: tt.fields.hash,
+				calc: tt.fields.calc,
 			}
-			if err := c.ByKey(tt.args.ids, tt.args.fn); (err != nil) != tt.wantErr {
-				t.Errorf("ByKey() error = %v, wantErr %v", err, tt.wantErr)
+			if err := c.ByKeys(tt.args.ids, tt.args.fn); (err != nil) != tt.wantErr {
+				t.Errorf("ByKeys() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestShardsConfigFromEnv(t *testing.T) {
+	type args struct {
+		prefix []string
+	}
+	type envVar struct {
+		key, value string
+	}
+	tests := []struct {
+		name string
+		args args
+		envs []envVar
+		want []ShardConfig
+	}{
+		{
+			"empty",
+			args{},
+			[]envVar{},
+			[]ShardConfig{},
+		},
+		{
+			"one",
+			args{},
+			[]envVar{
+				{"SHARD_ADDRESS_1", "1"},
+			},
+			[]ShardConfig{
+				{1, "1"},
+			},
+		},
+		{
+			"one with prefix 1",
+			args{[]string{"TEST"}},
+			[]envVar{
+				{"TEST_SHARD_ADDRESS_1", "1"},
+			},
+			[]ShardConfig{
+				{1, "1"},
+			},
+		},
+		{
+			"one with prefix",
+			args{[]string{"TEST_"}},
+			[]envVar{
+				{"TEST_SHARD_ADDRESS_1", "1"},
+			},
+			[]ShardConfig{
+				{1, "1"},
+			},
+		},
+		{
+			"three",
+			args{},
+			[]envVar{
+				{"SHARD_ADDRESS_1", "1"},
+				{"SHARD_ADDRESS_2", "2"},
+				{"SHARD_ADDRESS_3", "3"},
+			},
+			[]ShardConfig{
+				{1, "1"},
+				{2, "2"},
+				{3, "3"},
+			},
+		},
+		{
+			"three with prefix 1",
+			args{[]string{"TEST"}},
+			[]envVar{
+				{"TEST_SHARD_ADDRESS_1", "1"},
+				{"TEST_SHARD_ADDRESS_2", "2"},
+				{"TEST_SHARD_ADDRESS_3", "3"},
+			},
+			[]ShardConfig{
+				{1, "1"},
+				{2, "2"},
+				{3, "3"},
+			},
+		},
+		{
+			"three with prefix",
+			args{[]string{"TEST_"}},
+			[]envVar{
+				{"TEST_SHARD_ADDRESS_1", "1"},
+				{"TEST_SHARD_ADDRESS_2", "2"},
+				{"TEST_SHARD_ADDRESS_3", "3"},
+			},
+			[]ShardConfig{
+				{1, "1"},
+				{2, "2"},
+				{3, "3"},
+			},
+		},
+		{
+			"fallback",
+			args{},
+			[]envVar{
+				{"SHARD_ADDRESS", "1"},
+			},
+			[]ShardConfig{
+				{1, "1"},
+			},
+		},
+		{
+			"fallback with prefix 1",
+			args{[]string{"TEST"}},
+			[]envVar{
+				{"TEST_SHARD_ADDRESS", "1"},
+			},
+			[]ShardConfig{
+				{1, "1"},
+			},
+		},
+		{
+			"fallback with prefix 2",
+			args{[]string{"TEST_"}},
+			[]envVar{
+				{"TEST_SHARD_ADDRESS", "1"},
+			},
+			[]ShardConfig{
+				{1, "1"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Clearenv()
+			for _, e := range tt.envs {
+				_ = os.Setenv(e.key, e.value)
+			}
+			if got := ShardsConfigFromEnv(tt.args.prefix...); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ShardsConfigFromEnv() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_areShardsUnique(t *testing.T) {
+	type args struct {
+		shards []ShardConfig
+	}
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{
+			"unique one",
+			args{[]ShardConfig{
+				{1, "1"},
+			}},
+			true,
+		},
+		{
+			"unique three",
+			args{[]ShardConfig{
+				{1, "1"},
+				{2, "2"},
+				{3, "3"},
+			}},
+			true,
+		},
+		{
+			"non unique id",
+			args{[]ShardConfig{
+				{1, "1"},
+				{1, "2"},
+				{1, "3"},
+			}},
+			false,
+		},
+		{
+			"non unique id",
+			args{[]ShardConfig{
+				{1, "1"},
+				{2, "1"},
+				{3, "1"},
+			}},
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := areShardsUnique(tt.args.shards); got != tt.want {
+				t.Errorf("areShardsUnique() = %v, want %v", got, tt.want)
 			}
 		})
 	}

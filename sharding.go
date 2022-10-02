@@ -3,7 +3,9 @@ package sharding
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/crc64"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,37 +13,47 @@ import (
 )
 
 // Connect to database using configs.
-func Connect[KeyType ItemID, ConnID ConnectionID, ConnType any](
-	ctx context.Context,
-	connect ConnFunc[ConnType],
-	hash Hash[KeyType],
-	configs ...ConnConfig[ConnID],
-) (Cluster[KeyType, ConnID, ConnType], error) {
-	if len(configs) == 0 {
-		return nil, errors.New("at least one connection config is required")
+func Connect[KeyType ID, ConnType any](cfg Config[KeyType, ConnType]) (Cluster[KeyType, ConnType], error) {
+	if len(cfg.Shards) == 0 {
+		return nil, errors.New("at least one shard config is required")
+	}
+	if !areShardsUnique(cfg.Shards) {
+		return nil, errors.New("shard configurations are not unique")
+	}
+	if cfg.Connect == nil {
+		return nil, errors.New("connect func cannot be nil")
 	}
 	var (
-		c = &cluster[KeyType, ConnID, ConnType]{
-			list: make([]Shard[ConnID, ConnType], 0, len(configs)),
+		c = &cluster[KeyType, ConnType]{
+			list: make([]Shard[ConnType], 0, len(cfg.Shards)),
 		}
-		errCh = make(chan error, len(configs))
+		errCh = make(chan error, len(cfg.Shards))
+		ctx   = cfg.Context
 		mu    sync.Mutex
 		wg    sync.WaitGroup
 		err   error
 	)
-	for _, sc := range configs {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cfg.Strategy != nil {
+		c.calc = cfg.Strategy
+	} else {
+		c.calc = NewDefaultStrategy[KeyType, ConnType](nil)
+	}
+	for _, sc := range cfg.Shards {
 		if err = sc.valid(); err != nil {
 			return nil, err
 		}
 		wg.Add(1)
-		go func(id ConnID, dsn string) {
+		go func(id int64, dsn string) {
 			defer wg.Done()
-			conn, err := connect(ctx, dsn)
+			conn, err := cfg.Connect(ctx, dsn)
 			if err != nil {
 				errCh <- err
 				return
 			}
-			s := &shard[ConnID, ConnType]{id, conn}
+			s := &shard[ConnType]{id, conn}
 			mu.Lock()
 			c.list = append(c.list, s)
 			mu.Unlock()
@@ -52,50 +64,37 @@ func Connect[KeyType ItemID, ConnID ConnectionID, ConnType any](
 	if err = <-errCh; err != nil {
 		return nil, err
 	}
-	if hash != nil {
-		c.hash = hash
-	} else {
-		c.hash = newDefaultHash[KeyType]()
-	}
 	sort.Slice(c.list, func(i, j int) bool {
 		return c.list[i].ID() < c.list[j].ID()
 	})
 	return c, nil
 }
 
-// ItemID type definition.
-type ItemID interface {
+// Config struct.
+type Config[KeyType ID, ConnType any] struct {
+	Connect  ConnectFunc[ConnType]       // required. connection func
+	Shards   []ShardConfig               // required. shards config.
+	Context  context.Context             // optional. defaults to context.Background()
+	Strategy Strategy[KeyType, ConnType] // optional. defaults to defaultStrategy.
+}
+
+// ID type definition.
+type ID interface {
 	string | []byte | int64 | uint64
 }
 
-// ConnectionID type definition.
-type ConnectionID interface {
-	int64 | uint64 | string
-}
+// ConnectFunc wraps connection func.
+type ConnectFunc[ConnType any] func(ctx context.Context, addr string) (ConnType, error)
 
-// ConnFunc wraps connection func.
-type ConnFunc[ConnType any] func(ctx context.Context, addr string) (ConnType, error)
-
-// ConnConfig type include constant connection id and dsn.
-type ConnConfig[ConnID ConnectionID] struct {
-	ID   ConnID `json:"id"`
+// ShardConfig type include constant connection id and dsn.
+type ShardConfig struct {
+	ID   int64  `json:"id"`
 	Addr string `json:"dsn"`
 }
 
-func (cfg *ConnConfig[ConnID]) valid() error {
-	switch v := any(cfg.ID).(type) {
-	case int64:
-		if v == 0 {
-			return errors.New("0 is not a valid id")
-		}
-	case uint64:
-		if v == 0 {
-			return errors.New("0 is not a valid id")
-		}
-	case string:
-		if strings.TrimSpace(v) == "" {
-			return errors.New("id cannot be an empty string")
-		}
+func (cfg *ShardConfig) valid() error {
+	if cfg.ID == 0 {
+		return errors.New("validation: invalid shard id")
 	}
 	if strings.TrimSpace(cfg.Addr) == "" {
 		return errors.New("validation: invalid dsn")
@@ -103,48 +102,98 @@ func (cfg *ConnConfig[ConnID]) valid() error {
 	return nil
 }
 
+const shardAddr = "SHARD_ADDRESS"
+
+// ShardsConfigFromEnv loads parses environment variables and searches for
+// variables called [prefix_]SHARD_ADDRESS_n, where prefix is optional and
+// n is an increment number.
+func ShardsConfigFromEnv(prefix ...string) []ShardConfig {
+	p := ""
+	if len(prefix) == 1 {
+		if strings.HasSuffix(prefix[0], "_") {
+			p = prefix[0]
+		} else {
+			p = prefix[0] + "_"
+		}
+	}
+	var (
+		shards       = make([]ShardConfig, 0)
+		id     int64 = 1
+	)
+	for {
+		addr := os.Getenv(fmt.Sprintf("%s%s_%d", p, shardAddr, id))
+		if addr == "" {
+			break
+		}
+		shards = append(shards, ShardConfig{id, addr})
+		id++
+	}
+	if len(shards) == 0 {
+		if addr := os.Getenv(fmt.Sprintf("%s%s", p, shardAddr)); addr != "" {
+			shards = append(shards, ShardConfig{1, addr})
+		}
+	}
+	return shards
+}
+
+func areShardsUnique(shards []ShardConfig) bool {
+	ids := make(map[int64]struct{}, len(shards))
+	addresses := make(map[string]struct{}, len(shards))
+	for _, s := range shards {
+		if _, ex := ids[s.ID]; ex {
+			return false
+		}
+		ids[s.ID] = struct{}{}
+		if _, ex := addresses[s.Addr]; ex {
+			return false
+		}
+		addresses[s.Addr] = struct{}{}
+	}
+	return true
+}
+
 // Cluster interface.
-type Cluster[KeyType ItemID, ConnID ConnectionID, ConnType any] interface {
+type Cluster[KeyType ID, ConnType any] interface {
 
 	// All returns all shards.
-	All() []Shard[ConnID, ConnType]
+	All() []Shard[ConnType]
 
 	// One returns Shard by key.
-	One(key KeyType) Shard[ConnID, ConnType]
+	One(key KeyType) Shard[ConnType]
 
 	// Each runs fn on each shard within cluster.
-	Each(fn func(s Shard[ConnID, ConnType]) error) error
+	Each(fn func(s Shard[ConnType]) error) error
 
 	// Map takes a list of identifiers and returns a map[] where the key is the corresponding
 	// shard and the value is a slice of ids that belong to shard.
-	Map(ids []KeyType) map[Shard[ConnID, ConnType]][]KeyType
+	Map(ids []KeyType) map[Shard[ConnType]][]KeyType
 
-	// ByKey executes fn on each result of Map func.
-	ByKey(ids []KeyType, fn func([]KeyType, Shard[ConnID, ConnType]) error) error
+	// ByKeys executes fn on each result of Map func.
+	ByKeys(ids []KeyType, fn func([]KeyType, Shard[ConnType]) error) error
 }
 
-type cluster[KeyType ItemID, ConnID ConnectionID, ConnType any] struct {
-	list []Shard[ConnID, ConnType]
-	hash Hash[KeyType]
+type cluster[KeyType ID, ConnType any] struct {
+	list []Shard[ConnType]
+	calc Strategy[KeyType, ConnType]
 }
 
 // All returns all shards.
-func (c *cluster[KeyType, ConnID, ConnType]) All() []Shard[ConnID, ConnType] {
+func (c *cluster[KeyType, ConnType]) All() []Shard[ConnType] {
 	return c.list
 }
 
 // One returns Shard by key.
-func (c *cluster[KeyType, ConnID, ConnType]) One(key KeyType) Shard[ConnID, ConnType] {
-	return c.list[int(c.hash.Sum(key)%uint64(len(c.list)))]
+func (c *cluster[KeyType, ConnType]) One(key KeyType) Shard[ConnType] {
+	return c.calc.Find(key, c.list)
 }
 
 // Each runs fn on each shard within cluster.
-func (c *cluster[KeyType, ConnID, ConnType]) Each(fn func(s Shard[ConnID, ConnType]) error) error {
+func (c *cluster[KeyType, ConnType]) Each(fn func(s Shard[ConnType]) error) error {
 	errCh := make(chan error, len(c.list))
 	wg := sync.WaitGroup{}
 	for _, s := range c.list {
 		wg.Add(1)
-		go func(s Shard[ConnID, ConnType]) {
+		go func(s Shard[ConnType]) {
 			defer wg.Done()
 			if err := fn(s); err != nil {
 				errCh <- err
@@ -158,8 +207,8 @@ func (c *cluster[KeyType, ConnID, ConnType]) Each(fn func(s Shard[ConnID, ConnTy
 
 // Map takes a list of identifiers and returns a map[] where the key is the corresponding
 // shard and the value is a slice of ids that belong to shard.
-func (c *cluster[KeyType, ConnID, ConnType]) Map(ids []KeyType) map[Shard[ConnID, ConnType]][]KeyType {
-	res := make(map[Shard[ConnID, ConnType]][]KeyType, len(ids))
+func (c *cluster[KeyType, ConnType]) Map(ids []KeyType) map[Shard[ConnType]][]KeyType {
+	res := make(map[Shard[ConnType]][]KeyType, len(ids))
 	for _, id := range ids {
 		s := c.One(id)
 		if _, ok := res[s]; !ok {
@@ -170,14 +219,14 @@ func (c *cluster[KeyType, ConnID, ConnType]) Map(ids []KeyType) map[Shard[ConnID
 	return res
 }
 
-// ByKey executes fn on each result of Map func.
-func (c *cluster[KeyType, ConnID, ConnType]) ByKey(ids []KeyType, fn func([]KeyType, Shard[ConnID, ConnType]) error) error {
+// ByKeys executes fn on each result of Map func.
+func (c *cluster[KeyType, ConnType]) ByKeys(ids []KeyType, fn func([]KeyType, Shard[ConnType]) error) error {
 	m := c.Map(ids)
 	wg := sync.WaitGroup{}
 	errCh := make(chan error, len(m))
 	for s, i := range m {
 		wg.Add(1)
-		go func(ids []KeyType, sh Shard[ConnID, ConnType]) {
+		go func(ids []KeyType, sh Shard[ConnType]) {
 			defer wg.Done()
 			if err := fn(ids, sh); err != nil {
 				errCh <- err
@@ -190,36 +239,36 @@ func (c *cluster[KeyType, ConnID, ConnType]) ByKey(ids []KeyType, fn func([]KeyT
 }
 
 // Shard interface.
-type Shard[ConnID ConnectionID, ConnType any] interface {
-	ID() ConnID
+type Shard[ConnType any] interface {
+	ID() int64
 	Conn() ConnType
 }
 
-type shard[ConnID ConnectionID, ConnType any] struct {
-	id   ConnID
+type shard[ConnType any] struct {
+	id   int64
 	conn ConnType
 }
 
-// ID returns ConnID.
-func (s *shard[ConnID, ConnType]) ID() ConnID {
+// ID returns ConnIDType.
+func (s *shard[ConnType]) ID() int64 {
 	return s.id
 }
 
 // Conn returns database connection.
-func (s *shard[ConnID, ConnType]) Conn() ConnType {
+func (s *shard[ConnType]) Conn() ConnType {
 	return s.conn
 }
 
 // Hash interface.
-type Hash[KeyType ItemID] interface {
+type Hash[KeyType ID] interface {
 	Sum(key KeyType) uint64
 }
 
-func newDefaultHash[KeyType ItemID]() *defaultHash[KeyType] {
+func NewDefaultHash[KeyType ID]() Hash[KeyType] {
 	return &defaultHash[KeyType]{crc64.MakeTable(crc64.ISO)}
 }
 
-type defaultHash[KeyType ItemID] struct {
+type defaultHash[KeyType ID] struct {
 	t *crc64.Table
 }
 
@@ -237,4 +286,31 @@ func (h *defaultHash[KeyType]) Sum(id KeyType) uint64 {
 		idb = i
 	}
 	return crc64.Checksum(idb, h.t)
+}
+
+// Strategy interface.
+type Strategy[KeyType ID, ConnType any] interface {
+
+	// Find shard by key.
+	Find(key KeyType, shards []Shard[ConnType]) Shard[ConnType]
+}
+
+func NewDefaultStrategy[KeyType ID, ConnType any](
+	hash Hash[KeyType],
+) Strategy[KeyType, ConnType] {
+	if hash == nil {
+		hash = NewDefaultHash[KeyType]()
+	}
+	return &defaultStrategy[KeyType, ConnType]{hash}
+}
+
+type defaultStrategy[KeyType ID, ConnType any] struct {
+	hash Hash[KeyType]
+}
+
+func (c *defaultStrategy[KeyType, ConnType]) Find(
+	key KeyType,
+	shards []Shard[ConnType],
+) Shard[ConnType] {
+	return shards[int(c.hash.Sum(key)%uint64(len(shards)))]
 }

@@ -19,12 +19,12 @@ import (
 // and then query the data from all shards.
 func main() {
 	// connect func
-	connect := sharding.ConnFunc[*sql.DB](func(_ context.Context, addr string) (*sql.DB, error) {
+	connect := sharding.ConnectFunc[*sql.DB](func(_ context.Context, addr string) (*sql.DB, error) {
 		return sql.Open("postgres", addr)
 	})
 
 	// define shards
-	shards := []sharding.ConnConfig[int64]{
+	shards := []sharding.ShardConfig{
 		{
 			ID:   1,
 			Addr: "postgres://postgres:password@localhost:5432/db1",
@@ -40,18 +40,19 @@ func main() {
 	}
 
 	// connect to database shards
-	cluster, err := sharding.Connect[string, int64, *sql.DB](
-		context.Background(), // use background context
-		connect,              // use connect func, defined above
-		nil,                  // use default hash algorithm (crc64)
-		shards...,            // shards configuration
+	cluster, err := sharding.Connect[string, *sql.DB](
+		sharding.Config[string, *sql.DB]{
+			Context: context.Background(),
+			Connect: connect,
+			Shards:  shards,
+		},
 	)
 	if err != nil {
 		log.Fatalf("failed to connect: %s\n", err)
 	}
 
 	// create tables
-	if err = cluster.Each(func(s sharding.Shard[int64, *sql.DB]) error {
+	if err = cluster.Each(func(s sharding.Shard[*sql.DB]) error {
 		_, err := s.Conn().Exec(
 			"CREATE TABLE IF NOT EXISTS sample (id CHAR(20) NOT NULL PRIMARY KEY, value TEXT)")
 		return err
@@ -79,7 +80,7 @@ func main() {
 	mu := sync.Mutex{}
 
 	// query rows from all shard in parallel
-	if err = cluster.ByKey(ids, func(ids []string, s sharding.Shard[int64, *sql.DB]) error {
+	if err = cluster.ByKeys(ids, func(ids []string, s sharding.Shard[*sql.DB]) error {
 		pointers := make([]string, len(ids))
 		args := make([]any, len(ids))
 		for i := 1; i <= len(ids); i++ {

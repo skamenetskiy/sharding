@@ -14,13 +14,13 @@ import (
 
 func main() {
 	// connect func
-	connect := sharding.ConnFunc[*memcache.Client](func(_ context.Context, addr string) (*memcache.Client, error) {
+	connect := sharding.ConnectFunc[*memcache.Client](func(_ context.Context, addr string) (*memcache.Client, error) {
 		client := memcache.New(addr)
 		return client, nil
 	})
 
 	// define shards
-	shards := []sharding.ConnConfig[int64]{
+	shards := []sharding.ShardConfig{
 		{
 			ID:   1,
 			Addr: "127.0.0.1:11211",
@@ -36,11 +36,12 @@ func main() {
 	}
 
 	// connect to database shards
-	cluster, err := sharding.Connect[string, int64, *memcache.Client](
-		context.Background(), // use background context
-		connect,              // use connect func, defined above
-		nil,                  // use default hash algorithm (crc64)
-		shards...,            // shards configuration
+	cluster, err := sharding.Connect[string, *memcache.Client](
+		sharding.Config[string, *memcache.Client]{
+			Context: context.Background(),
+			Connect: connect,
+			Shards:  shards,
+		},
 	)
 	if err != nil {
 		log.Fatalf("failed to connect: %s\n", err)
@@ -70,7 +71,7 @@ func main() {
 	mu := sync.Mutex{}
 
 	// query items from all shards in parallel
-	if err = cluster.ByKey(ids, func(ids []string, s sharding.Shard[int64, *memcache.Client]) error {
+	if err = cluster.ByKeys(ids, func(ids []string, s sharding.Shard[*memcache.Client]) error {
 		items, err := s.Conn().GetMulti(ids)
 		if err != nil {
 			return err
