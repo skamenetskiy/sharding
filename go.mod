@@ -1,3 +1,3 @@
-module sharding
+module github.com/skamenetskiy/sharding
 
 go 1.19
